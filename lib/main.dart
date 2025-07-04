@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:url_launcher/url_launcher.dart';
-import 'package:flutter_beacon/flutter_beacon.dart';
+import 'package:beacon_broadcast/beacon_broadcast.dart';
 import 'dart:async';
 import 'dart:io';
 import 'dart:math';
@@ -38,9 +38,9 @@ class _BLEMacScannerState extends State<BLEMacScanner> {
   String _status = "Đang kiểm tra quyền...";
   String _deviceMac = "";
   bool _isAdvertising = false;
-  StreamSubscription<BluetoothAdapterState>? _adapterStateSubscription;
   Timer? _keepAliveTimer;
   String _beaconUuid = "";
+  BeaconBroadcast beaconBroadcast = BeaconBroadcast();
 
   @override
   void initState() {
@@ -51,7 +51,6 @@ class _BLEMacScannerState extends State<BLEMacScanner> {
 
   @override
   void dispose() {
-    _adapterStateSubscription?.cancel();
     _keepAliveTimer?.cancel();
     _stopAdvertising();
     super.dispose();
@@ -86,21 +85,6 @@ class _BLEMacScannerState extends State<BLEMacScanner> {
     });
   }
 
-  @override
-  void initState() {
-    super.initState();
-    _initializeBLE();
-  }
-
-  @override
-  void dispose() {
-    _adapterStateSubscription?.cancel();
-    _scanSubscription?.cancel();
-    _advertisingTimer?.cancel();
-    FlutterBluePlus.stopScan();
-    super.dispose();
-  }
-
   // Khởi tạo BLE và kiểm tra quyền
   Future<void> _initializeBLE() async {
     setState(() {
@@ -131,29 +115,23 @@ class _BLEMacScannerState extends State<BLEMacScanner> {
   // Khởi tạo beacon service
   Future<void> _initializeBeacon() async {
     try {
-      await flutterBeacon.initializeScanning;
-      
       setState(() {
-        _status = "Đang kiểm tra Bluetooth...";
+        _status = "Đang kiểm tra khả năng phát beacon...";
       });
 
-      // Kiểm tra trạng thái Bluetooth
-      final isBluetoothEnabled = await flutterBeacon.bluetoothState;
+      // Kiểm tra xem thiết bị có hỗ trợ advertising không
+      bool isSupported = await beaconBroadcast.checkTransmissionSupported();
       
-      if (isBluetoothEnabled == BluetoothState.stateOn) {
-        await _startAdvertising();
-      } else {
+      if (!isSupported) {
         setState(() {
-          _status = "Vui lòng bật Bluetooth để tiếp tục";
+          _status = "Thiết bị không hỗ trợ phát BLE beacon";
         });
-        
-        // Lắng nghe thay đổi trạng thái Bluetooth
-        flutterBeacon.bluetoothStateChanged().listen((state) {
-          if (state == BluetoothState.stateOn) {
-            _startAdvertising();
-          }
-        });
+        return;
       }
+
+      // Bắt đầu phát beacon
+      await _startAdvertising();
+      
     } catch (e) {
       setState(() {
         _status = "Lỗi khởi tạo beacon: $e";
@@ -202,16 +180,17 @@ class _BLEMacScannerState extends State<BLEMacScanner> {
         _status = "Đang bắt đầu phát BLE beacon...";
       });
 
-      // Tạo beacon với thông tin tùy chỉnh
-      final beacon = Beacon(
-        proximityUUID: _beaconUuid,
-        major: 1,
-        minor: 1,
-        identifier: 'MyBeacon',
-      );
+      // Thiết lập beacon layout (iBeacon format)
+      beaconBroadcast
+          .setUUID(_beaconUuid)
+          .setMajorId(1)
+          .setMinorId(1)
+          .setIdentifier('MyBeacon')
+          .setLayout(BeaconBroadcast.ALTBEACON_LAYOUT)
+          .setManufacturerId(0x004c); // Apple manufacturer ID for iBeacon
 
       // Bắt đầu phát beacon
-      await flutterBeacon.startBroadcast(beacon);
+      await beaconBroadcast.start();
       
       setState(() {
         _isAdvertising = true;
@@ -239,18 +218,11 @@ class _BLEMacScannerState extends State<BLEMacScanner> {
     _keepAliveTimer = Timer.periodic(const Duration(seconds: 30), (timer) async {
       if (_isAdvertising) {
         try {
-          // Restart beacon để đảm bảo vẫn đang phát
-          await flutterBeacon.stopBroadcast();
-          await Future.delayed(const Duration(milliseconds: 500));
-          
-          final beacon = Beacon(
-            proximityUUID: _beaconUuid,
-            major: 1,
-            minor: 1,
-            identifier: 'MyBeacon',
-          );
-          
-          await flutterBeacon.startBroadcast(beacon);
+          // Kiểm tra và restart beacon nếu cần
+          bool isTransmitting = await beaconBroadcast.isTransmitting();
+          if (!isTransmitting) {
+            await beaconBroadcast.start();
+          }
         } catch (e) {
           print("Lỗi duy trì beacon: $e");
         }
@@ -261,7 +233,7 @@ class _BLEMacScannerState extends State<BLEMacScanner> {
   // Dừng phát beacon
   Future<void> _stopAdvertising() async {
     try {
-      await flutterBeacon.stopBroadcast();
+      await beaconBroadcast.stop();
       _keepAliveTimer?.cancel();
       setState(() {
         _isAdvertising = false;
