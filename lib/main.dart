@@ -34,7 +34,7 @@ class MyApp extends StatelessWidget {
         // tested with just a hot reload.
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
       ),
-      home: const MyHomePage(title: 'Flutter Demo Home Page'),
+      home: const MyHomePage(title: 'Bluetooth MAC Scanner'),
     );
   }
 }
@@ -69,28 +69,22 @@ class _MyHomePageState extends State<MyHomePage> {
 
   // Check and request Bluetooth permissions
   Future<void> _checkBluetoothStatus() async {
-    // Request Bluetooth permissions.
-    // On Android 12+, BLUETOOTH_SCAN and BLUETOOTH_CONNECT are required.
-    // On older Android versions, BLUETOOTH and BLUETOOTH_ADMIN are sufficient.
-    // ACCESS_FINE_LOCATION is often needed for scanning on both platforms.
-    var status = await FlutterBluePlus.requestPermissions();
-    // Check if Bluetooth is currently enabled.
-    FlutterBluePlus.adapterState.listen((state) {
-      if (state == BluetoothAdapterState.on) {
-        setState(() {
-          _bluetoothStatus = "Bluetooth is ON. Tap to scan.";
-        });
-      } else {
-        setState(() {
-          _bluetoothStatus = "Bluetooth is OFF. Please turn it ON.";
-        });
-      }
-    });
-
-    if (status.any((status) => status.isDenied)) {
-    } else {
+    try {
+      // Check if Bluetooth is currently enabled.
+      FlutterBluePlus.adapterState.listen((state) {
+        if (state == BluetoothAdapterState.on) {
+          setState(() {
+            _bluetoothStatus = "Bluetooth is ON. Tap to scan.";
+          });
+        } else {
+          setState(() {
+            _bluetoothStatus = "Bluetooth is OFF. Please turn it ON.";
+          });
+        }
+      });
+    } catch (e) {
       setState(() {
-        _bluetoothStatus = "Bluetooth permissions not granted.";
+        _bluetoothStatus = "Error checking Bluetooth status: $e";
       });
     }
   }
@@ -101,24 +95,40 @@ class _MyHomePageState extends State<MyHomePage> {
       _deviceIdentifier = "Scanning...";
     });
 
-    // Start scanning for a short duration
-    await FlutterBluePlus.startScan(timeout: const Duration(seconds: 5));
+    try {
+      // Start scanning for a short duration
+      await FlutterBluePlus.startScan(timeout: const Duration(seconds: 5));
 
-    // Listen to scan results and get the first available device
-    var subscription = FlutterBluePlus.scanResults.listen((results) {
-      if (results.isNotEmpty) {
-        // Get the first scanned device
-        ScanResult firstResult = results.first;
-        // Use device ID as identifier. Note: MAC address is not reliably available on all platforms/versions for privacy.
-        String identifier = firstResult.device.id.toString(); // Use device ID (often UUID on iOS, MAC on some Android)
-        setState(() {
-          _deviceIdentifier = "Device found: ${firstResult.device.platformName}";
-        });
-        _launchURL(identifier);
-        // Stop scanning after finding a device
-        FlutterBluePlus.stopScan();
-      }
-    });
+      // Listen to scan results and get the first available device
+      var subscription = FlutterBluePlus.scanResults.listen((results) {
+        if (results.isNotEmpty) {
+          // Get the first scanned device
+          ScanResult firstResult = results.first;
+          // Use device ID as identifier. Note: MAC address is not reliably available on all platforms/versions for privacy.
+          String identifier = firstResult.device.remoteId.toString(); // Use remoteId instead of id
+          setState(() {
+            _deviceIdentifier = "Device found: ${firstResult.device.platformName.isNotEmpty ? firstResult.device.platformName : 'Unknown Device'}";
+          });
+          _launchURL(identifier);
+          // Stop scanning after finding a device
+          FlutterBluePlus.stopScan();
+        }
+      });
+
+      // Auto-stop scan after timeout and cleanup
+      Future.delayed(const Duration(seconds: 6), () {
+        subscription.cancel();
+        if (mounted && _deviceIdentifier == "Scanning...") {
+          setState(() {
+            _deviceIdentifier = "No devices found. Try again.";
+          });
+        }
+      });
+    } catch (e) {
+      setState(() {
+        _deviceIdentifier = "Error scanning: $e";
+      });
+    }
   }
 
   // Launch the URL with the device identifier
@@ -168,18 +178,33 @@ class _MyHomePageState extends State<MyHomePage> {
           // wireframe for each widget.
           mainAxisAlignment: MainAxisAlignment.center,
           children: <Widget>[
-            const Text('You have pushed the button this many times:'),
-            Text(_bluetoothStatus),
+            const Text(
+              'Bluetooth Device Scanner',
+              style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 20),
+            Text(
+              _bluetoothStatus,
+              textAlign: TextAlign.center,
+              style: const TextStyle(fontSize: 16),
+            ),
+            const SizedBox(height: 10),
             Text(
               _deviceIdentifier,
+              textAlign: TextAlign.center,
+              style: const TextStyle(fontSize: 16),
             ),
             const SizedBox(height: 20),
             ElevatedButton(
               onPressed: () {
                 // Check if Bluetooth is on before scanning
                 FlutterBluePlus.adapterState.first.then((state) {
-                  if (state == BluetoothState.on) {
+                  if (state == BluetoothAdapterState.on) {
                     _scanAndGetIdentifier();
+                  } else {
+                    setState(() {
+                      _bluetoothStatus = "Please turn on Bluetooth first!";
+                    });
                   }
                 });
               },
