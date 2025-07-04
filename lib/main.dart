@@ -2,8 +2,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:flutter_beacon/flutter_beacon.dart';
 import 'dart:async';
 import 'dart:io';
+import 'dart:math';
 
 void main() {
   runApp(const MyApp());
@@ -35,10 +37,54 @@ class BLEMacScanner extends StatefulWidget {
 class _BLEMacScannerState extends State<BLEMacScanner> {
   String _status = "Đang kiểm tra quyền...";
   String _deviceMac = "";
-  bool _isScanning = false;
+  bool _isAdvertising = false;
   StreamSubscription<BluetoothAdapterState>? _adapterStateSubscription;
-  StreamSubscription<List<ScanResult>>? _scanSubscription;
-  Timer? _advertisingTimer;
+  Timer? _keepAliveTimer;
+  String _beaconUuid = "";
+
+  @override
+  void initState() {
+    super.initState();
+    _generateBeaconUuid();
+    _initializeBLE();
+  }
+
+  @override
+  void dispose() {
+    _adapterStateSubscription?.cancel();
+    _keepAliveTimer?.cancel();
+    _stopAdvertising();
+    super.dispose();
+  }
+
+  // Tạo UUID duy nhất cho beacon
+  void _generateBeaconUuid() {
+    final random = Random();
+    final bytes = List<int>.generate(16, (i) => random.nextInt(256));
+    
+    // Format UUID như chuẩn
+    _beaconUuid = 
+        "${bytes[0].toRadixString(16).padLeft(2, '0')}"
+        "${bytes[1].toRadixString(16).padLeft(2, '0')}"
+        "${bytes[2].toRadixString(16).padLeft(2, '0')}"
+        "${bytes[3].toRadixString(16).padLeft(2, '0')}-"
+        "${bytes[4].toRadixString(16).padLeft(2, '0')}"
+        "${bytes[5].toRadixString(16).padLeft(2, '0')}-"
+        "${bytes[6].toRadixString(16).padLeft(2, '0')}"
+        "${bytes[7].toRadixString(16).padLeft(2, '0')}-"
+        "${bytes[8].toRadixString(16).padLeft(2, '0')}"
+        "${bytes[9].toRadixString(16).padLeft(2, '0')}-"
+        "${bytes[10].toRadixString(16).padLeft(2, '0')}"
+        "${bytes[11].toRadixString(16).padLeft(2, '0')}"
+        "${bytes[12].toRadixString(16).padLeft(2, '0')}"
+        "${bytes[13].toRadixString(16).padLeft(2, '0')}"
+        "${bytes[14].toRadixString(16).padLeft(2, '0')}"
+        "${bytes[15].toRadixString(16).padLeft(2, '0')}";
+    
+    setState(() {
+      _deviceMac = _beaconUuid.toUpperCase();
+    });
+  }
 
   @override
   void initState() {
@@ -72,12 +118,45 @@ class _BLEMacScannerState extends State<BLEMacScanner> {
         return;
       }
 
-      // Kiểm tra trạng thái Bluetooth
-      await _checkBluetoothState();
+      // Khởi tạo beacon
+      await _initializeBeacon();
       
     } catch (e) {
       setState(() {
         _status = "Lỗi khởi tạo: $e";
+      });
+    }
+  }
+
+  // Khởi tạo beacon service
+  Future<void> _initializeBeacon() async {
+    try {
+      await flutterBeacon.initializeScanning;
+      
+      setState(() {
+        _status = "Đang kiểm tra Bluetooth...";
+      });
+
+      // Kiểm tra trạng thái Bluetooth
+      final isBluetoothEnabled = await flutterBeacon.bluetoothState;
+      
+      if (isBluetoothEnabled == BluetoothState.stateOn) {
+        await _startAdvertising();
+      } else {
+        setState(() {
+          _status = "Vui lòng bật Bluetooth để tiếp tục";
+        });
+        
+        // Lắng nghe thay đổi trạng thái Bluetooth
+        flutterBeacon.bluetoothStateChanged().listen((state) {
+          if (state == BluetoothState.stateOn) {
+            _startAdvertising();
+          }
+        });
+      }
+    } catch (e) {
+      setState(() {
+        _status = "Lỗi khởi tạo beacon: $e";
       });
     }
   }
@@ -93,122 +172,110 @@ class _BLEMacScannerState extends State<BLEMacScanner> {
         Permission.bluetoothAdvertise,
         Permission.bluetoothConnect,
         Permission.location,
+        Permission.locationWhenInUse,
       ]);
     } else if (Platform.isIOS) {
-      permissions.add(Permission.bluetooth);
+      permissions.addAll([
+        Permission.bluetooth,
+        Permission.locationWhenInUse,
+      ]);
     }
 
-    Map<Permission, PermissionStatus> statuses = await permissions.request();
-    
-    // Kiểm tra xem tất cả quyền có được cấp không
-    for (var status in statuses.values) {
-      if (status != PermissionStatus.granted) {
-        return false;
+    // Yêu cầu từng quyền một cách linh hoạt
+    bool allGranted = true;
+    for (Permission permission in permissions) {
+      final status = await permission.request();
+      if (status != PermissionStatus.granted && status != PermissionStatus.permanentlyDenied) {
+        allGranted = false;
       }
     }
     
-    return true;
+    return allGranted;
   }
 
-  // Kiểm tra trạng thái Bluetooth
-  Future<void> _checkBluetoothState() async {
-    _adapterStateSubscription = FlutterBluePlus.adapterState.listen((state) {
-      if (state == BluetoothAdapterState.on) {
-        setState(() {
-          _status = "Bluetooth đã bật. Đang quét thiết bị...";
-        });
-        _startScanning();
-      } else {
-        setState(() {
-          _status = "Vui lòng bật Bluetooth";
-        });
-      }
-    });
-  }
-
-  // Bắt đầu quét thiết bị BLE
-  Future<void> _startScanning() async {
-    if (_isScanning) return;
-    
-    setState(() {
-      _isScanning = true;
-      _status = "Đang quét thiết bị BLE...";
-    });
+  // Bắt đầu phát BLE beacon
+  Future<void> _startAdvertising() async {
+    if (_isAdvertising) return;
 
     try {
-      await FlutterBluePlus.startScan(
-        timeout: const Duration(seconds: 10),
-        androidUsesFineLocation: true,
-      );
-
-      _scanSubscription = FlutterBluePlus.scanResults.listen((results) {
-        for (ScanResult result in results) {
-          if (result.device.remoteId.toString().isNotEmpty) {
-            String mac = result.device.remoteId.toString();
-            setState(() {
-              _deviceMac = mac;
-              _status = "Đã tìm thấy thiết bị: $mac";
-            });
-            
-            // Dừng quét và chuyển hướng
-            FlutterBluePlus.stopScan();
-            _startAdvertising();
-            _redirectToWeb(mac);
-            break;
-          }
-        }
+      setState(() {
+        _status = "Đang bắt đầu phát BLE beacon...";
       });
 
-      // Nếu không tìm thấy thiết bị nào sau 10 giây
-      Future.delayed(const Duration(seconds: 10), () {
-        if (_isScanning && _deviceMac.isEmpty) {
-          setState(() {
-            _status = "Không tìm thấy thiết bị. Đang thử lại...";
-          });
-          _startScanning(); // Thử lại
-        }
+      // Tạo beacon với thông tin tùy chỉnh
+      final beacon = Beacon(
+        proximityUUID: _beaconUuid,
+        major: 1,
+        minor: 1,
+        identifier: 'MyBeacon',
+      );
+
+      // Bắt đầu phát beacon
+      await flutterBeacon.startBroadcast(beacon);
+      
+      setState(() {
+        _isAdvertising = true;
+        _status = "Đang phát BLE beacon. Chuyển hướng sau 3 giây...";
+      });
+
+      // Thiết lập timer để duy trì hoạt động
+      _setupKeepAlive();
+
+      // Chuyển hướng sau 3 giây
+      Future.delayed(const Duration(seconds: 3), () {
+        _redirectToWeb(_deviceMac);
       });
 
     } catch (e) {
       setState(() {
-        _status = "Lỗi quét: $e";
-        _isScanning = false;
+        _status = "Lỗi bắt đầu phát beacon: $e";
+        _isAdvertising = false;
       });
     }
   }
 
-  // Bắt đầu phát BLE liên tục
-  void _startAdvertising() {
-    // Phát BLE mỗi 5 giây
-    _advertisingTimer = Timer.periodic(const Duration(seconds: 5), (timer) {
-      _advertiseBLE();
+  // Duy trì beacon hoạt động
+  void _setupKeepAlive() {
+    _keepAliveTimer = Timer.periodic(const Duration(seconds: 30), (timer) async {
+      if (_isAdvertising) {
+        try {
+          // Restart beacon để đảm bảo vẫn đang phát
+          await flutterBeacon.stopBroadcast();
+          await Future.delayed(const Duration(milliseconds: 500));
+          
+          final beacon = Beacon(
+            proximityUUID: _beaconUuid,
+            major: 1,
+            minor: 1,
+            identifier: 'MyBeacon',
+          );
+          
+          await flutterBeacon.startBroadcast(beacon);
+        } catch (e) {
+          print("Lỗi duy trì beacon: $e");
+        }
+      }
     });
   }
 
-  // Phát BLE (advertising)
-  Future<void> _advertiseBLE() async {
+  // Dừng phát beacon
+  Future<void> _stopAdvertising() async {
     try {
-      // Ghi chú: Flutter Blue Plus không hỗ trợ trực tiếp advertising
-      // Bạn có thể cần sử dụng plugin khác như flutter_bluetooth_serial
-      // hoặc tự implement native code cho advertising
-      
-      // Thay vào đó, chúng ta sẽ tiếp tục quét để duy trì hoạt động BLE
-      if (!_isScanning) {
-        await FlutterBluePlus.startScan(timeout: const Duration(seconds: 2));
-        Future.delayed(const Duration(seconds: 2), () {
-          FlutterBluePlus.stopScan();
-        });
-      }
+      await flutterBeacon.stopBroadcast();
+      _keepAliveTimer?.cancel();
+      setState(() {
+        _isAdvertising = false;
+      });
     } catch (e) {
-      print("Lỗi advertising: $e");
+      print("Lỗi dừng beacon: $e");
     }
   }
 
-  // Chuyển hướng sang web với địa chỉ MAC
-  Future<void> _redirectToWeb(String mac) async {
-    await Future.delayed(const Duration(seconds: 2)); // Chờ 2 giây để hiển thị thông tin
+  // Chuyển hướng sang web với thông tin beacon
+  Future<void> _redirectToWeb(String beaconId) async {
+    await Future.delayed(const Duration(seconds: 1)); // Chờ 1 giây
     
-    final Uri url = Uri.parse('https://google.com/search?q=$mac');
+    final Uri url = Uri.parse('https://google.com/search?q=beacon_$beaconId');
     
     try {
       bool launched = await launchUrl(
@@ -216,14 +283,18 @@ class _BLEMacScannerState extends State<BLEMacScanner> {
         mode: LaunchMode.externalApplication,
       );
       
-      if (!launched) {
+      if (launched) {
         setState(() {
-          _status = "Không thể mở trình duyệt";
+          _status = "Đã chuyển hướng web. Beacon vẫn đang chạy ngầm.";
+        });
+      } else {
+        setState(() {
+          _status = "Không thể mở trình duyệt. Beacon vẫn đang hoạt động.";
         });
       }
     } catch (e) {
       setState(() {
-        _status = "Lỗi mở URL: $e";
+        _status = "Lỗi mở URL: $e. Beacon vẫn đang hoạt động.";
       });
     }
   }
@@ -231,11 +302,10 @@ class _BLEMacScannerState extends State<BLEMacScanner> {
   // Thử lại quá trình
   void _retry() {
     setState(() {
-      _deviceMac = "";
-      _isScanning = false;
       _status = "Đang thử lại...";
     });
-    _advertisingTimer?.cancel();
+    _stopAdvertising();
+    _generateBeaconUuid();
     _initializeBLE();
   }
 
@@ -243,7 +313,7 @@ class _BLEMacScannerState extends State<BLEMacScanner> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('BLE MAC Scanner'),
+        title: const Text('BLE Beacon Transmitter'),
         backgroundColor: Theme.of(context).colorScheme.inversePrimary,
       ),
       body: Center(
@@ -252,14 +322,14 @@ class _BLEMacScannerState extends State<BLEMacScanner> {
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              const Icon(
-                Icons.bluetooth_searching,
+              Icon(
+                _isAdvertising ? Icons.bluetooth_connected : Icons.bluetooth_searching,
                 size: 80,
-                color: Colors.blue,
+                color: _isAdvertising ? Colors.green : Colors.blue,
               ),
               const SizedBox(height: 20),
               const Text(
-                'BLE MAC Scanner',
+                'BLE Beacon Transmitter',
                 style: TextStyle(
                   fontSize: 24,
                   fontWeight: FontWeight.bold,
@@ -276,15 +346,17 @@ class _BLEMacScannerState extends State<BLEMacScanner> {
                 Container(
                   padding: const EdgeInsets.all(16),
                   decoration: BoxDecoration(
-                    color: Colors.blue.shade50,
+                    color: _isAdvertising ? Colors.green.shade50 : Colors.blue.shade50,
                     borderRadius: BorderRadius.circular(8),
-                    border: Border.all(color: Colors.blue.shade200),
+                    border: Border.all(
+                      color: _isAdvertising ? Colors.green.shade200 : Colors.blue.shade200,
+                    ),
                   ),
                   child: Column(
                     children: [
-                      const Text(
-                        'Địa chỉ MAC:',
-                        style: TextStyle(
+                      Text(
+                        _isAdvertising ? 'Beacon UUID (Đang phát):' : 'Beacon UUID:',
+                        style: const TextStyle(
                           fontSize: 14,
                           fontWeight: FontWeight.bold,
                         ),
@@ -293,25 +365,74 @@ class _BLEMacScannerState extends State<BLEMacScanner> {
                       Text(
                         _deviceMac,
                         style: const TextStyle(
-                          fontSize: 16,
+                          fontSize: 12,
                           fontFamily: 'monospace',
                         ),
+                        textAlign: TextAlign.center,
                       ),
+                      if (_isAdvertising) ...[
+                        const SizedBox(height: 10),
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Container(
+                              width: 8,
+                              height: 8,
+                              decoration: const BoxDecoration(
+                                color: Colors.green,
+                                shape: BoxShape.circle,
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            const Text(
+                              'Đang phát beacon',
+                              style: TextStyle(
+                                color: Colors.green,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
                     ],
                   ),
                 ),
               const SizedBox(height: 30),
-              ElevatedButton.icon(
-                onPressed: _retry,
-                icon: const Icon(Icons.refresh),
-                label: const Text('Thử lại'),
-                style: ElevatedButton.styleFrom(
-                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-                ),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                children: [
+                  ElevatedButton.icon(
+                    onPressed: _retry,
+                    icon: const Icon(Icons.refresh),
+                    label: const Text('Thử lại'),
+                    style: ElevatedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                    ),
+                  ),
+                  if (_isAdvertising)
+                    ElevatedButton.icon(
+                      onPressed: () => _stopAdvertising(),
+                      icon: const Icon(Icons.stop),
+                      label: const Text('Dừng'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.red,
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                      ),
+                    ),
+                ],
               ),
               const SizedBox(height: 20),
-              if (_isScanning)
-                const CircularProgressIndicator(),
+              if (_isAdvertising)
+                const Text(
+                  'App đang chạy ngầm phát beacon.\nCác beacon của bạn có thể đo RSSI từ thiết bị này.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: Colors.grey,
+                    fontStyle: FontStyle.italic,
+                  ),
+                ),
             ],
           ),
         ),
