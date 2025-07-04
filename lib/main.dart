@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'dart:async';
+import 'dart:io';
 
 void main() {
   runApp(const MyApp());
@@ -10,207 +12,308 @@ void main() {
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
 
-  // This widget is the root of your application.
-  // This widget is the root of your application.
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Flutter Demo',
+      title: 'BLE MAC Scanner',
       theme: ThemeData(
-        // This is the theme of your application.
-        //
-        // TRY THIS: Try running your application with "flutter run". You'll see
-        // the application has a purple toolbar. Then, without quitting the app,
-        // try changing the seedColor in the colorScheme below to Colors.green
-        // and then invoke "hot reload" (save your changes or press the "hot
-        // reload" button in a Flutter-supported IDE, or press "r" if you used
-        // the command line to start the app).
-        //
-        // Notice that the counter didn't reset back to zero; the application
-        // state is not lost during the reload. To reset the state, use hot
-        // restart instead.
-        //
-        // This works for code too, not just values: Most code changes can be
-        // tested with just a hot reload.
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
+        colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
+        useMaterial3: true,
       ),
-      home: const MyHomePage(title: 'Bluetooth MAC Scanner'),
+      home: const BLEMacScanner(),
     );
   }
 }
 
-class MyHomePage extends StatefulWidget {
-  const MyHomePage({super.key, required this.title});
-
-  // This widget is the home page of your application. It is stateful, meaning
-  // that it has a State object (defined below) that contains fields that affect
-  // how it looks.
-
-  // This class is the configuration for the state. It holds the values (in this
-  // case the title) provided by the parent (in this case the App widget) and
-  // used by the build method of the State. Fields in a Widget subclass are
-  // always marked "final".
-
-  final String title;
+class BLEMacScanner extends StatefulWidget {
+  const BLEMacScanner({super.key});
 
   @override
-  State<MyHomePage> createState() => _MyHomePageState();
+  State<BLEMacScanner> createState() => _BLEMacScannerState();
 }
 
-class _MyHomePageState extends State<MyHomePage> {
-  String _bluetoothStatus = "Checking Bluetooth...";
-  String _deviceIdentifier = "Scanning for device...";
+class _BLEMacScannerState extends State<BLEMacScanner> {
+  String _status = "Đang kiểm tra quyền...";
+  String _deviceMac = "";
+  bool _isScanning = false;
+  StreamSubscription<BluetoothAdapterState>? _adapterStateSubscription;
+  StreamSubscription<List<ScanResult>>? _scanSubscription;
+  Timer? _advertisingTimer;
 
   @override
   void initState() {
     super.initState();
-    _checkBluetoothStatus();
+    _initializeBLE();
   }
 
-  // Check and request Bluetooth permissions
-  Future<void> _checkBluetoothStatus() async {
-    try {
-      // Check if Bluetooth is currently enabled.
-      FlutterBluePlus.adapterState.listen((state) {
-        if (state == BluetoothAdapterState.on) {
-          setState(() {
-            _bluetoothStatus = "Bluetooth is ON. Tap to scan.";
-          });
-        } else {
-          setState(() {
-            _bluetoothStatus = "Bluetooth is OFF. Please turn it ON.";
-          });
-        }
-      });
-    } catch (e) {
-      setState(() {
-        _bluetoothStatus = "Error checking Bluetooth status: $e";
-      });
-    }
+  @override
+  void dispose() {
+    _adapterStateSubscription?.cancel();
+    _scanSubscription?.cancel();
+    _advertisingTimer?.cancel();
+    FlutterBluePlus.stopScan();
+    super.dispose();
   }
 
-  // Scan for a Bluetooth device and get its identifier
-  Future<void> _scanAndGetIdentifier() async {
+  // Khởi tạo BLE và kiểm tra quyền
+  Future<void> _initializeBLE() async {
     setState(() {
-      _deviceIdentifier = "Scanning...";
+      _status = "Đang kiểm tra quyền BLE...";
     });
 
     try {
-      // Start scanning for a short duration
-      await FlutterBluePlus.startScan(timeout: const Duration(seconds: 5));
+      // Kiểm tra và yêu cầu quyền
+      bool hasPermissions = await _requestPermissions();
+      
+      if (!hasPermissions) {
+        setState(() {
+          _status = "Cần cấp quyền Bluetooth để tiếp tục";
+        });
+        return;
+      }
 
-      // Listen to scan results and get the first available device
-      var subscription = FlutterBluePlus.scanResults.listen((results) {
-        if (results.isNotEmpty) {
-          // Get the first scanned device
-          ScanResult firstResult = results.first;
-          // Use device ID as identifier. Note: MAC address is not reliably available on all platforms/versions for privacy.
-          String identifier = firstResult.device.remoteId.toString(); // Use remoteId instead of id
-          setState(() {
-            _deviceIdentifier = "Device found: ${firstResult.device.platformName.isNotEmpty ? firstResult.device.platformName : 'Unknown Device'}";
-          });
-          _launchURL(identifier);
-          // Stop scanning after finding a device
-          FlutterBluePlus.stopScan();
-        }
-      });
-
-      // Auto-stop scan after timeout and cleanup
-      Future.delayed(const Duration(seconds: 6), () {
-        subscription.cancel();
-        if (mounted && _deviceIdentifier == "Scanning...") {
-          setState(() {
-            _deviceIdentifier = "No devices found. Try again.";
-          });
-        }
-      });
+      // Kiểm tra trạng thái Bluetooth
+      await _checkBluetoothState();
+      
     } catch (e) {
       setState(() {
-        _deviceIdentifier = "Error scanning: $e";
+        _status = "Lỗi khởi tạo: $e";
       });
     }
   }
 
-  // Launch the URL with the device identifier
-  Future<void> _launchURL(String identifier) async {
-    final Uri _url = Uri.parse('https://example.com/?mac=$identifier');
-    if (!await launchUrl(_url)) {
-      // Handle error if URL cannot be launched
-      throw Exception('Could not launch $_url');
+  // Yêu cầu quyền cần thiết
+  Future<bool> _requestPermissions() async {
+    List<Permission> permissions = [];
+    
+    if (Platform.isAndroid) {
+      permissions.addAll([
+        Permission.bluetooth,
+        Permission.bluetoothScan,
+        Permission.bluetoothAdvertise,
+        Permission.bluetoothConnect,
+        Permission.location,
+      ]);
+    } else if (Platform.isIOS) {
+      permissions.add(Permission.bluetooth);
     }
+
+    Map<Permission, PermissionStatus> statuses = await permissions.request();
+    
+    // Kiểm tra xem tất cả quyền có được cấp không
+    for (var status in statuses.values) {
+      if (status != PermissionStatus.granted) {
+        return false;
+      }
+    }
+    
+    return true;
+  }
+
+  // Kiểm tra trạng thái Bluetooth
+  Future<void> _checkBluetoothState() async {
+    _adapterStateSubscription = FlutterBluePlus.adapterState.listen((state) {
+      if (state == BluetoothAdapterState.on) {
+        setState(() {
+          _status = "Bluetooth đã bật. Đang quét thiết bị...";
+        });
+        _startScanning();
+      } else {
+        setState(() {
+          _status = "Vui lòng bật Bluetooth";
+        });
+      }
+    });
+  }
+
+  // Bắt đầu quét thiết bị BLE
+  Future<void> _startScanning() async {
+    if (_isScanning) return;
+    
+    setState(() {
+      _isScanning = true;
+      _status = "Đang quét thiết bị BLE...";
+    });
+
+    try {
+      await FlutterBluePlus.startScan(
+        timeout: const Duration(seconds: 10),
+        androidUsesFineLocation: true,
+      );
+
+      _scanSubscription = FlutterBluePlus.scanResults.listen((results) {
+        for (ScanResult result in results) {
+          if (result.device.remoteId.toString().isNotEmpty) {
+            String mac = result.device.remoteId.toString();
+            setState(() {
+              _deviceMac = mac;
+              _status = "Đã tìm thấy thiết bị: $mac";
+            });
+            
+            // Dừng quét và chuyển hướng
+            FlutterBluePlus.stopScan();
+            _startAdvertising();
+            _redirectToWeb(mac);
+            break;
+          }
+        }
+      });
+
+      // Nếu không tìm thấy thiết bị nào sau 10 giây
+      Future.delayed(const Duration(seconds: 10), () {
+        if (_isScanning && _deviceMac.isEmpty) {
+          setState(() {
+            _status = "Không tìm thấy thiết bị. Đang thử lại...";
+          });
+          _startScanning(); // Thử lại
+        }
+      });
+
+    } catch (e) {
+      setState(() {
+        _status = "Lỗi quét: $e";
+        _isScanning = false;
+      });
+    }
+  }
+
+  // Bắt đầu phát BLE liên tục
+  void _startAdvertising() {
+    // Phát BLE mỗi 5 giây
+    _advertisingTimer = Timer.periodic(const Duration(seconds: 5), (timer) {
+      _advertiseBLE();
+    });
+  }
+
+  // Phát BLE (advertising)
+  Future<void> _advertiseBLE() async {
+    try {
+      // Ghi chú: Flutter Blue Plus không hỗ trợ trực tiếp advertising
+      // Bạn có thể cần sử dụng plugin khác như flutter_bluetooth_serial
+      // hoặc tự implement native code cho advertising
+      
+      // Thay vào đó, chúng ta sẽ tiếp tục quét để duy trì hoạt động BLE
+      if (!_isScanning) {
+        await FlutterBluePlus.startScan(timeout: const Duration(seconds: 2));
+        Future.delayed(const Duration(seconds: 2), () {
+          FlutterBluePlus.stopScan();
+        });
+      }
+    } catch (e) {
+      print("Lỗi advertising: $e");
+    }
+  }
+
+  // Chuyển hướng sang web với địa chỉ MAC
+  Future<void> _redirectToWeb(String mac) async {
+    await Future.delayed(const Duration(seconds: 2)); // Chờ 2 giây để hiển thị thông tin
+    
+    final Uri url = Uri.parse('https://google.com/search?q=$mac');
+    
+    try {
+      bool launched = await launchUrl(
+        url,
+        mode: LaunchMode.externalApplication,
+      );
+      
+      if (!launched) {
+        setState(() {
+          _status = "Không thể mở trình duyệt";
+        });
+      }
+    } catch (e) {
+      setState(() {
+        _status = "Lỗi mở URL: $e";
+      });
+    }
+  }
+
+  // Thử lại quá trình
+  void _retry() {
+    setState(() {
+      _deviceMac = "";
+      _isScanning = false;
+      _status = "Đang thử lại...";
+    });
+    _advertisingTimer?.cancel();
+    _initializeBLE();
   }
 
   @override
   Widget build(BuildContext context) {
-    // This method is rerun every time setState is called, for instance as done
-    // This method is rerun every time setState is called, for instance as done
-    // by the _incrementCounter method above.
-    //
-    // The Flutter framework has been optimized to make rerunning build methods
-    // fast, so that you can just rebuild anything that needs updating rather
-    // than having to individually change instances of widgets.
     return Scaffold(
       appBar: AppBar(
-        // TRY THIS: Try changing the color here to a specific color (to
-        // Colors.amber, perhaps?) and trigger a hot reload to see the AppBar
-        // change color while the other colors stay the same.
+        title: const Text('BLE MAC Scanner'),
         backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-        // Here we take the value from the MyHomePage object that was created by
-        // the App.build method, and use it to set our appbar title.
-        title: Text(widget.title),
       ),
       body: Center(
-        // Center is a layout widget. It takes a single child and positions it
-        // in the middle of the parent.
-        child: Column(
-          // Column is also a layout widget. It takes a list of children and
-          // arranges them vertically. By default, it sizes itself to fit its
-          // children horizontally, and tries to be as tall as its parent.
-          //
-          // Column has various properties to control how it sizes itself and
-          // how it positions its children. Here we use mainAxisAlignment to
-          // center the children vertically; the main axis here is the vertical
-          // axis because Columns are vertical (the cross axis would be
-          // horizontal).
-          //
-          // TRY THIS: Invoke "debug painting" (choose the "Toggle Debug Paint"
-          // action in the IDE, or press "p" in the console), to see the
-          // wireframe for each widget.
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: <Widget>[
-            const Text(
-              'Bluetooth Device Scanner',
-              style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 20),
-            Text(
-              _bluetoothStatus,
-              textAlign: TextAlign.center,
-              style: const TextStyle(fontSize: 16),
-            ),
-            const SizedBox(height: 10),
-            Text(
-              _deviceIdentifier,
-              textAlign: TextAlign.center,
-              style: const TextStyle(fontSize: 16),
-            ),
-            const SizedBox(height: 20),
-            ElevatedButton(
-              onPressed: () {
-                // Check if Bluetooth is on before scanning
-                FlutterBluePlus.adapterState.first.then((state) {
-                  if (state == BluetoothAdapterState.on) {
-                    _scanAndGetIdentifier();
-                  } else {
-                    setState(() {
-                      _bluetoothStatus = "Please turn on Bluetooth first!";
-                    });
-                  }
-                });
-              },
-              child: const Text('Scan and Open URL'),
-            ),
-          ],
+        child: Padding(
+          padding: const EdgeInsets.all(20.0),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const Icon(
+                Icons.bluetooth_searching,
+                size: 80,
+                color: Colors.blue,
+              ),
+              const SizedBox(height: 20),
+              const Text(
+                'BLE MAC Scanner',
+                style: TextStyle(
+                  fontSize: 24,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const SizedBox(height: 30),
+              Text(
+                _status,
+                textAlign: TextAlign.center,
+                style: const TextStyle(fontSize: 16),
+              ),
+              const SizedBox(height: 20),
+              if (_deviceMac.isNotEmpty)
+                Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: Colors.blue.shade50,
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: Colors.blue.shade200),
+                  ),
+                  child: Column(
+                    children: [
+                      const Text(
+                        'Địa chỉ MAC:',
+                        style: TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      const SizedBox(height: 5),
+                      Text(
+                        _deviceMac,
+                        style: const TextStyle(
+                          fontSize: 16,
+                          fontFamily: 'monospace',
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              const SizedBox(height: 30),
+              ElevatedButton.icon(
+                onPressed: _retry,
+                icon: const Icon(Icons.refresh),
+                label: const Text('Thử lại'),
+                style: ElevatedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                ),
+              ),
+              const SizedBox(height: 20),
+              if (_isScanning)
+                const CircularProgressIndicator(),
+            ],
+          ),
         ),
       ),
     );
