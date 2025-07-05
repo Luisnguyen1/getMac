@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:device_info_plus/device_info_plus.dart';
@@ -55,19 +54,16 @@ class _BLEMacScannerState extends State<BLEMacScanner> {
     super.dispose();
   }
 
-  // Khởi tạo BLE và kiểm tra quyền
   Future<void> _initializeBLE() async {
     setState(() {
       _status = "Đang kiểm tra quyền BLE...";
     });
-
     try {
       // Lấy thông tin thiết bị trước
       await _getDeviceInfo();
       
       // Kiểm tra và yêu cầu quyền
       bool hasPermissions = await _requestPermissions();
-      
       if (!hasPermissions) {
         setState(() {
           _status = "Cần cấp quyền Bluetooth để tiếp tục";
@@ -107,13 +103,13 @@ class _BLEMacScannerState extends State<BLEMacScanner> {
       setState(() {
         _deviceMac = "DEVICE_${DateTime.now().millisecondsSinceEpoch}";
       });
+      return;
     }
+    await _startAdvertising();
   }
 
-  // Yêu cầu quyền cần thiết
   Future<bool> _requestPermissions() async {
     List<Permission> permissions = [];
-    
     if (Platform.isAndroid) {
       permissions.addAll([
         Permission.bluetooth,
@@ -129,8 +125,6 @@ class _BLEMacScannerState extends State<BLEMacScanner> {
         Permission.locationWhenInUse,
       ]);
     }
-
-    // Yêu cầu từng quyền một cách linh hoạt
     bool allGranted = true;
     for (Permission permission in permissions) {
       final status = await permission.request();
@@ -138,7 +132,6 @@ class _BLEMacScannerState extends State<BLEMacScanner> {
         allGranted = false;
       }
     }
-    
     return allGranted;
   }
 
@@ -173,11 +166,9 @@ class _BLEMacScannerState extends State<BLEMacScanner> {
         _status = "BLE đã sẵn sàng. Chuyển hướng sau 3 giây...";
       });
 
-      // Chuyển hướng sau 3 giây
       Future.delayed(const Duration(seconds: 3), () {
         _redirectToWeb(_deviceMac);
       });
-
     } catch (e) {
       setState(() {
         _status = "Lỗi khởi động BLE: $e";
@@ -231,35 +222,23 @@ class _BLEMacScannerState extends State<BLEMacScanner> {
     }
   }
 
-  // Chuyển hướng sang web với thông tin beacon
   Future<void> _redirectToWeb(String beaconId) async {
-    await Future.delayed(const Duration(seconds: 1)); // Chờ 1 giây
-    
+    await Future.delayed(const Duration(seconds: 1));
     final Uri url = Uri.parse('https://google.com/search?q=beacon_$beaconId');
-    
     try {
-      bool launched = await launchUrl(
-        url,
-        mode: LaunchMode.externalApplication,
-      );
-      
-      if (launched) {
-        setState(() {
-          _status = "Đã chuyển hướng web. Beacon vẫn đang chạy ngầm.";
-        });
-      } else {
-        setState(() {
-          _status = "Không thể mở trình duyệt. Beacon vẫn đang hoạt động.";
-        });
-      }
+      bool launched = await launchUrl(url, mode: LaunchMode.externalApplication);
+      setState(() {
+        _status = launched
+            ? "Đã chuyển hướng web. Beacon vẫn đang chạy ngầm."
+            : "Không thể mở trình duyệt. Beacon vẫn hoạt động.";
+      });
     } catch (e) {
       setState(() {
-        _status = "Lỗi mở URL: $e. Beacon vẫn đang hoạt động.";
+        _status = "Lỗi mở URL: $e. Beacon vẫn hoạt động.";
       });
     }
   }
 
-  // Thử lại quá trình
   void _retry() {
     setState(() {
       _status = "Đang thử lại...";
@@ -323,10 +302,7 @@ class _BLEMacScannerState extends State<BLEMacScanner> {
                       const SizedBox(height: 5),
                       Text(
                         _deviceMac,
-                        style: const TextStyle(
-                          fontSize: 12,
-                          fontFamily: 'monospace',
-                        ),
+                        style: const TextStyle(fontSize: 12, fontFamily: 'monospace'),
                         textAlign: TextAlign.center,
                       ),
                       if (_isBluetoothReady) ...[
@@ -386,11 +362,7 @@ class _BLEMacScannerState extends State<BLEMacScanner> {
                 const Text(
                   'App đang chạy ngầm với BLE discoverable.\nCác beacon của bạn có thể đo RSSI từ thiết bị này.',
                   textAlign: TextAlign.center,
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: Colors.grey,
-                    fontStyle: FontStyle.italic,
-                  ),
+                  style: TextStyle(fontSize: 12, color: Colors.grey, fontStyle: FontStyle.italic),
                 ),
             ],
           ),
